@@ -1,0 +1,4 @@
+# A script hash covers its exact bytes, line endings included: keep the
+# example site identical on every checkout.
+*.html text eol=lf
+_headers text eol=lf
