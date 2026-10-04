@@ -1,0 +1,39 @@
+name: CSP Hash Check
+description: Fail the build when an inline script is not allowed by your Content-Security-Policy (_headers or meta tag).
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  path:
+    description: The directory your site is served from (where index.html and _headers live).
+    required: true
+  headers:
+    description: A _headers file elsewhere than <path>/_headers. Empty for the default.
+    default: ""
+  fail-on-stale:
+    description: Treat hashes no inline script uses any more as errors, not warnings.
+    default: "false"
+  python-version:
+    description: Python to run it with. Any 3.8 or later.
+    default: "3.x"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: csp-hash-check
+      shell: bash
+      # Inputs travel as environment variables, not interpolated into the
+      # script, so a path can never be read as shell syntax.
+      env:
+        CSP_PATH: ${{ inputs.path }}
+        CSP_HEADERS: ${{ inputs.headers }}
+        CSP_STALE: ${{ inputs.fail-on-stale }}
+      run: |
+        args=("$CSP_PATH")
+        if [ -n "$CSP_HEADERS" ]; then args+=(--headers "$CSP_HEADERS"); fi
+        if [ "$CSP_STALE" = "true" ]; then args+=(--fail-on-stale); fi
+        python "$GITHUB_ACTION_PATH/csp_hash_check.py" "${args[@]}"

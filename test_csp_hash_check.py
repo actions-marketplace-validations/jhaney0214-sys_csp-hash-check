@@ -1,0 +1,162 @@
+"""Tests: python -m unittest test_csp_hash_check"""
+
+import os
+import shutil
+import tempfile
+import unittest
+
+import csp_hash_check as c
+
+SCRIPT = "\n  console.log('hello');\n"
+HASH = c.digest(SCRIPT)
+
+
+class Site(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def page(self, rel, html):
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(html)
+
+    def headers(self, text):
+        with open(os.path.join(self.root, "_headers"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def run_check(self):
+        return c.check(self.root)
+
+
+class TheHash(unittest.TestCase):
+    def test_it_is_the_browsers_hash(self):
+        # The example from the CSP specification: alert('Hello, world.');
+        self.assertEqual(c.digest("alert('Hello, world.');"),
+                         "'sha256-qznLcsROx4GACP2dm0UCKCzCG+HiZ1guq6ZZDob/Tng='")
+
+    def test_whitespace_and_line_endings_count(self):
+        self.assertNotEqual(c.digest("a\n"), c.digest("a\r\n"))
+        self.assertNotEqual(c.digest("a"), c.digest(" a"))
+
+
+class Scripts(Site):
+    def test_an_allowed_script_passes(self):
+        self.page("index.html", "<script>%s</script>" % SCRIPT)
+        self.headers("/*\n  Content-Security-Policy: script-src 'self' %s\n" % HASH)
+        errors, warnings, _, pages = self.run_check()
+        self.assertEqual((errors, warnings, pages), ([], [], 1))
+
+    def test_a_changed_script_fails_and_names_its_new_hash(self):
+        self.page("index.html", "<p>\n<script>%s// edited\n</script>" % SCRIPT)
+        self.headers("/*\n  Content-Security-Policy: script-src 'self' %s\n" % HASH)
+        errors, warnings, _, _ = self.run_check()
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0][1], 2)                       # the line of the script
+        self.assertIn(c.digest(SCRIPT + "// edited\n"), errors[0][2])
+        self.assertEqual(len(warnings), 1)                      # the old hash is now stale
+
+    def test_external_scripts_and_data_blocks_are_not_inline_scripts(self):
+        self.page("index.html", '<script src="app.js"></script>'
+                                '<script type="application/ld+json">{"@type": "Thing"}</script>'
+                                '<script type="text/template"><b>x</b></script>')
+        self.headers("/*\n  Content-Security-Policy: script-src 'self'\n")
+        errors, _, _, _ = self.run_check()
+        self.assertEqual(errors, [])
+
+    def test_a_module_script_is_checked(self):
+        self.page("index.html", '<script type="module">%s</script>' % SCRIPT)
+        self.headers("/*\n  Content-Security-Policy: script-src 'self'\n")
+        self.assertEqual(len(self.run_check()[0]), 1)
+
+    def test_default_src_governs_when_script_src_is_absent(self):
+        self.page("index.html", "<script>%s</script>" % SCRIPT)
+        self.headers("/*\n  Content-Security-Policy: default-src 'none'\n")
+        self.assertEqual(len(self.run_check()[0]), 1)
+
+
+class Policies(Site):
+    def test_unsafe_inline_allows_scripts_until_a_hash_is_present(self):
+        self.page("index.html", "<script>%s</script>" % SCRIPT)
+        self.headers("/*\n  Content-Security-Policy: script-src 'unsafe-inline'\n")
+        self.assertEqual(self.run_check()[0], [])
+        # A browser ignores 'unsafe-inline' once a hash or nonce is listed.
+        self.headers("/*\n  Content-Security-Policy: script-src 'unsafe-inline' 'sha256-AAAA'\n")
+        self.assertEqual(len(self.run_check()[0]), 1)
+
+    def test_a_meta_policy_is_enforced_too(self):
+        self.page("index.html", '<meta http-equiv="Content-Security-Policy" content="script-src \'self\'">'
+                                "<script>%s</script>" % SCRIPT)
+        errors, _, _, _ = self.run_check()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("<meta>", errors[0][2])
+
+    def test_every_policy_must_allow_it(self):
+        self.page("index.html", '<meta http-equiv="Content-Security-Policy" content="script-src \'self\'">'
+                                "<script>%s</script>" % SCRIPT)
+        self.headers("/*\n  Content-Security-Policy: script-src %s\n" % HASH)
+        self.assertEqual(len(self.run_check()[0]), 1)           # the meta policy still blocks it
+
+    def test_a_nonce_is_noted_not_judged(self):
+        self.page("index.html", "<script>%s</script>" % SCRIPT)
+        self.headers("/*\n  Content-Security-Policy: script-src 'nonce-abc'\n")
+        errors, _, notes, _ = self.run_check()
+        self.assertEqual(errors, [])
+        self.assertTrue(any("nonce" in n[2] for n in notes))
+
+    def test_a_page_with_no_policy_is_noted(self):
+        self.page("index.html", "<script>%s</script>" % SCRIPT)
+        errors, _, notes, _ = self.run_check()
+        self.assertEqual(errors, [])
+        self.assertIn("no Content-Security-Policy", notes[0][2])
+
+
+class Paths(Site):
+    def test_patterns_follow_the_served_url(self):
+        self.page("blog/post.html", "<script>%s</script>" % SCRIPT)
+        self.page("index.html", "<script>%s</script>" % SCRIPT)
+        self.headers("/blog/*\n  Content-Security-Policy: script-src 'self'\n")
+        errors, _, notes, _ = self.run_check()
+        self.assertEqual([e[0].replace(os.sep, "/") for e in errors], ["blog/post.html"])
+        self.assertTrue(any(n[0] == "index.html" for n in notes))
+
+    def test_a_placeholder_matches_one_segment(self):
+        self.assertTrue(c.matches("/posts/:slug", "/posts/hello"))
+        self.assertFalse(c.matches("/posts/:slug", "/posts/a/b"))
+
+    def test_pretty_urls_are_matched(self):
+        self.assertIn("/about", c.url_paths("about.html"))
+        self.assertIn("/docs/", c.url_paths(os.path.join("docs", "index.html")))
+
+
+class Handlers(Site):
+    def test_an_inline_handler_is_blocked_by_a_hash_policy(self):
+        self.page("index.html", '<form onsubmit="return false"></form>')
+        self.headers("/*\n  Content-Security-Policy: script-src 'self'\n")
+        errors, _, _, _ = self.run_check()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("onsubmit", errors[0][2])
+
+    def test_unsafe_hashes_or_unsafe_inline_lets_it_run(self):
+        self.page("index.html", '<button onclick="go()">x</button>')
+        self.headers("/*\n  Content-Security-Policy: script-src 'self' 'unsafe-hashes' 'sha256-AAAA'\n")
+        self.assertEqual(self.run_check()[0], [])
+        self.headers("/*\n  Content-Security-Policy: script-src 'unsafe-inline'\n")
+        self.assertEqual(self.run_check()[0], [])
+
+
+class Stale(Site):
+    def test_an_unused_hash_is_a_warning_or_an_error_on_request(self):
+        self.page("index.html", "<p>no scripts</p>")
+        self.headers("/*\n  Content-Security-Policy: script-src 'self' %s\n" % HASH)
+        errors, warnings, _, _ = self.run_check()
+        self.assertEqual((len(errors), len(warnings)), (0, 1))
+        self.assertEqual(c.main([self.root]), 0)
+        self.assertEqual(c.main([self.root, "--fail-on-stale"]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

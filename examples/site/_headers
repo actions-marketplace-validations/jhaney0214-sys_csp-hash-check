@@ -1,0 +1,2 @@
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'sha256-dVSOhNSPg+3exKXYT5b61vJDylbS6cAjTABbysMSTfw='; base-uri 'none'; frame-ancestors 'none'
