@@ -1,5 +1,7 @@
 # CSP Hash Check
 
+[On the GitHub Marketplace](https://github.com/marketplace/actions/csp-hash-check)
+
 Fail the build when an inline script on your static site is not allowed by its
 Content-Security-Policy.
 
