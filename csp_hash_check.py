@@ -17,6 +17,11 @@ the rest), which only run under 'unsafe-inline' or 'unsafe-hashes'; and hashes
 in a policy that no inline script on its pages produces any more (stale, a
 warning unless --fail-on-stale).
 
+With --styles it does the same for inline <style> elements and style=
+attributes against style-src. That is off by default: many sites that hash
+their scripts still allow inline styles on purpose, and a check that fails
+every one of their pages would be switched off.
+
 Standard library only. Output is plain lines, plus GitHub annotations when it
 runs inside GitHub Actions.
 """
@@ -32,6 +37,8 @@ SCRIPT = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.S | re.I)
 META = re.compile(r"<meta\b[^>]*http-equiv\s*=\s*[\"']?content-security-policy[\"']?[^>]*>", re.I)
 CONTENT = re.compile(r"content\s*=\s*(\"([^\"]*)\"|'([^']*)')", re.I)
 HANDLER = re.compile(r"<[a-z][^>]*?\s(on[a-z]+)\s*=", re.I)
+STYLE = re.compile(r"<style\b([^>]*)>(.*?)</style\s*>", re.S | re.I)
+STYLE_ATTR = re.compile(r"<[a-z][^>]*?\sstyle\s*=", re.I)
 # Types a browser executes as script. Anything else (JSON-LD, templates,
 # importmaps are an exception below) is data and not subject to script-src.
 JS_TYPES = {"", "text/javascript", "application/javascript", "module", "text/ecmascript",
@@ -57,6 +64,16 @@ def inline_scripts(html):
             continue
         out.append((html.count("\n", 0, m.start()) + 1, body))
     return out
+
+
+def inline_styles(html):
+    """[(line, source)] for each <style> element."""
+    return [(html.count("\n", 0, m.start()) + 1, m.group(2)) for m in STYLE.finditer(html)]
+
+
+def style_attributes(html):
+    """The line of each element carrying a style= attribute."""
+    return [html.count("\n", 0, m.start()) + 1 for m in STYLE_ATTR.finditer(html)]
 
 
 def handlers(html):
@@ -128,6 +145,27 @@ def script_sources(policy):
     return None, None
 
 
+def style_sources(policy):
+    d = directives(policy)
+    for name in ("style-src-elem", "style-src", "default-src"):
+        if name in d:
+            return name, d[name]
+    return None, None
+
+
+def allows_style_attributes(policy):
+    """style= attributes: 'unsafe-inline' with no hash or nonce beside it, or
+    'unsafe-hashes'. A hash alone covers <style> elements, not attributes."""
+    d = directives(policy)
+    for name in ("style-src-attr", "style-src", "default-src"):
+        if name in d:
+            s = [x.lower() for x in d[name]]
+            if "'unsafe-inline'" in s and not any(x.startswith(("'sha", "'nonce-")) for x in s):
+                return True
+            return "'unsafe-hashes'" in s
+    return True
+
+
 def allows_inline(sources, hashed):
     """True, False, or 'nonce' when only a nonce could allow it (unchecked)."""
     lowered = [s.lower() for s in sources]
@@ -152,8 +190,9 @@ def allows_handlers(policy):
     return True        # no script policy at all: nothing is blocked
 
 
-def check(root, headers_file=None):
-    """(errors, warnings, notes), each a list of (file, line, message)."""
+def check(root, headers_file=None, styles=False):
+    """(errors, warnings, notes, pages); the first three are lists of
+    (file, line, message). With `styles`, inline styles are checked too."""
     errors, warnings, notes = [], [], []
     rules = []
     headers_file = headers_file or os.path.join(root, "_headers")
@@ -196,6 +235,27 @@ def check(root, headers_file=None):
                         errors.append((rel, line, "inline script blocked by %s (%s): add %s" % (where, name, h)))
                     elif verdict == "nonce":
                         notes.append((rel, line, "inline script relies on a nonce, which a static check cannot verify"))
+            if styles:
+                for line, source in inline_styles(html):
+                    h = digest(source)
+                    for i, policy in policies:
+                        name, sources = style_sources(policy)
+                        if sources is None:
+                            continue
+                        verdict = allows_inline(sources, h)
+                        if verdict is True and i is not None and h in sources:
+                            used[i].add(h)
+                        if verdict is False:
+                            where = "_headers" if i is not None else "<meta> policy"
+                            errors.append((rel, line, "inline style blocked by %s (%s): add %s"
+                                           % (where, name, h)))
+                        elif verdict == "nonce":
+                            notes.append((rel, line, "inline style relies on a nonce, which a static "
+                                                     "check cannot verify"))
+                for line in style_attributes(html):
+                    if not all(allows_style_attributes(p) for _, p in policies):
+                        errors.append((rel, line, "style= attribute is blocked: move it into a "
+                                                  "stylesheet, or allow it with 'unsafe-hashes'"))
             for line, attr_name in handlers(html):
                 if not all(allows_handlers(p) for _, p in policies):
                     errors.append((rel, line, "inline %s= handler is blocked: move it into a script file, "
@@ -206,6 +266,13 @@ def check(root, headers_file=None):
             if s.lower().startswith("'sha") and s not in used[i]:
                 warnings.append((os.path.relpath(headers_file, root), 1,
                                  "%s under %s matches no inline script: stale?" % (s, pattern)))
+        if styles:
+            name, style = style_sources(policy)
+            # default-src is shared with scripts and was reported just above.
+            for s in (style or []) if name != "default-src" else []:
+                if s.lower().startswith("'sha") and s not in used[i]:
+                    warnings.append((os.path.relpath(headers_file, root), 1,
+                                     "%s under %s matches no inline style: stale?" % (s, pattern)))
     return errors, warnings, notes, pages
 
 
@@ -214,8 +281,10 @@ def main(argv=None):
     ap.add_argument("root", help="the directory the site is served from")
     ap.add_argument("--headers", help="a _headers file (default: <root>/_headers)")
     ap.add_argument("--fail-on-stale", action="store_true", help="treat unused hashes as errors")
+    ap.add_argument("--styles", action="store_true",
+                    help="also check inline <style> elements and style= attributes against style-src")
     a = ap.parse_args(argv)
-    errors, warnings, notes, pages = check(a.root, a.headers)
+    errors, warnings, notes, pages = check(a.root, a.headers, styles=a.styles)
     if a.fail_on_stale:
         errors, warnings = errors + warnings, []
     gh = os.environ.get("GITHUB_ACTIONS") == "true"

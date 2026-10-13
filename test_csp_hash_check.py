@@ -158,5 +158,62 @@ class Stale(Site):
         self.assertEqual(c.main([self.root, "--fail-on-stale"]), 1)
 
 
+CSS = "\n  body { margin: 0 }\n"
+CSS_HASH = c.digest(CSS)
+
+
+class Styles(Site):
+    """Off unless asked for: a site that hashes scripts may allow inline styles on purpose."""
+
+    def policy(self, style_src):
+        self.headers("/*\n  Content-Security-Policy: script-src 'self'; style-src %s\n" % style_src)
+
+    def test_styles_are_not_looked_at_by_default(self):
+        self.page("index.html", "<style>%s</style><p style=\"color:red\">x</p>" % CSS)
+        self.policy("'self'")
+        errors, warnings, _, _ = c.check(self.root)
+        self.assertEqual((errors, warnings), ([], []))
+        self.assertEqual(c.main([self.root]), 0)
+        self.assertEqual(c.main([self.root, "--styles"]), 1)
+
+    def test_a_hashed_style_element_passes_and_an_edited_one_is_told_its_hash(self):
+        self.page("index.html", "<style>%s</style>" % CSS)
+        self.page("other.html", "<style>%s </style>" % CSS)
+        self.policy("'self' %s" % CSS_HASH)
+        errors, warnings, _, _ = c.check(self.root, styles=True)
+        self.assertEqual(warnings, [])
+        self.assertEqual([e[0] for e in errors], ["other.html"])
+        self.assertIn(c.digest(CSS + " "), errors[0][2])
+        self.assertIn("style-src", errors[0][2])
+
+    def test_a_hash_does_not_cover_a_style_attribute(self):
+        self.page("index.html", "<style>%s</style><p style=\"color:red\">x</p>" % CSS)
+        self.policy("'self' %s" % CSS_HASH)
+        errors, _, _, _ = c.check(self.root, styles=True)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("style= attribute", errors[0][2])
+
+    def test_unsafe_inline_allows_both_until_a_hash_sits_beside_it(self):
+        self.page("index.html", "<style>%s</style><p style=\"color:red\">x</p>" % CSS)
+        self.policy("'self' 'unsafe-inline'")
+        self.assertEqual(c.check(self.root, styles=True)[0], [])
+        self.policy("'self' 'unsafe-inline' %s" % c.digest("other"))
+        self.assertEqual(len(c.check(self.root, styles=True)[0]), 2)
+
+    def test_styles_fall_back_to_default_src(self):
+        self.page("index.html", "<style>%s</style>" % CSS)
+        self.headers("/*\n  Content-Security-Policy: default-src 'self'\n")
+        errors, _, _, _ = c.check(self.root, styles=True)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("default-src", errors[0][2])
+
+    def test_a_style_hash_nothing_uses_is_stale(self):
+        self.page("index.html", "<p>plain</p>")
+        self.policy("'self' %s" % CSS_HASH)
+        _, warnings, _, _ = c.check(self.root, styles=True)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("matches no inline style", warnings[0][2])
+
+
 if __name__ == "__main__":
     unittest.main()
