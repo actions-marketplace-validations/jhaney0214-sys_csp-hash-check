@@ -34,6 +34,7 @@ warning _headers:1  'sha256-q45lW+RZ+SStMbA0LFEjvaSHTrShlCQhrgv1E12Wrxc=' under 
 | `path` | required | The directory the site is served from |
 | `headers` | `<path>/_headers` | A `_headers` file kept somewhere else |
 | `fail-on-stale` | `false` | Treat hashes no inline script uses any more as errors |
+| `styles` | `false` | Also check inline styles against `style-src` (not in `v1.0.0`; see below) |
 | `python-version` | `3.x` | Any 3.8 or later |
 
 Or run it anywhere Python is: `python csp_hash_check.py public/`. It has no
@@ -63,7 +64,13 @@ dependencies.
 - **Scripts added at run time** by other scripts. It reads the HTML you ship.
 - **Nonces.** A nonce is minted per response, so a static file cannot be
   checked against one; pages that rely on one are noted, not judged.
-- **Inline styles** and `style-src`.
+- **Inline styles, unless you ask.** `styles: true` (or `--styles`) checks
+  `<style>` elements against `style-src-elem`, `style-src`, then
+  `default-src`, and `style=` attributes against `style-src-attr` and the
+  same fallbacks; a hash covers an element and never an attribute. It is off
+  by default because many sites that hash their scripts allow inline styles
+  on purpose. Added 2026-10-13 on `main`; the `v1` tag does not have it until
+  a release moves it. Styles set from script (`element.style`) are not seen.
 - **Headers set elsewhere**, by a server, CDN rule or framework config. It
   reads `_headers` and `<meta>` only.
 - **Whether the policy is a good one.** It checks that your scripts fit the

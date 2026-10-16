@@ -14,6 +14,9 @@ inputs:
   fail-on-stale:
     description: Treat hashes no inline script uses any more as errors, not warnings.
     default: "false"
+  styles:
+    description: Also check inline <style> elements and style= attributes against style-src.
+    default: "false"
   python-version:
     description: Python to run it with. Any 3.8 or later.
     default: "3.x"
@@ -32,8 +35,10 @@ runs:
         CSP_PATH: ${{ inputs.path }}
         CSP_HEADERS: ${{ inputs.headers }}
         CSP_STALE: ${{ inputs.fail-on-stale }}
+        CSP_STYLES: ${{ inputs.styles }}
       run: |
         args=("$CSP_PATH")
         if [ -n "$CSP_HEADERS" ]; then args+=(--headers "$CSP_HEADERS"); fi
         if [ "$CSP_STALE" = "true" ]; then args+=(--fail-on-stale); fi
+        if [ "$CSP_STYLES" = "true" ]; then args+=(--styles); fi
         python "$GITHUB_ACTION_PATH/csp_hash_check.py" "${args[@]}"
